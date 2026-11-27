@@ -1,7 +1,50 @@
+import { GoogleGenAI } from "@google/genai";
+
+// Credentials and base URL are supplied at runtime by Netlify AI Gateway.
+const ai = new GoogleGenAI({});
+const MODEL = "gemini-flash-latest";
+
+const json = (body, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
 export default async (req) => {
- if(req.method!=="POST")return new Response(JSON.stringify({error:"POST required"}),{status:405,headers:{"Content-Type":"application/json"}});
- try{const{mode,subject,level,question,answer,number=0}=await req.json();const key=process.env.GEMINI_API_KEY;if(!key)throw new Error("Gemini key is not configured in Netlify environment variables.");
- const prompt=mode==="question"?`You are a supportive, accurate college viva examiner. Ask one fresh ${level} difficulty question on ${subject}. This is question number ${number}. Output only the question.`:`Evaluate a student's viva answer. Subject ${subject}, difficulty ${level}. Question: ${question}. Answer: ${answer}. Give fair partial credit. Return only JSON: {"score":integer from 0 to 10,"feedback":"short useful feedback mentioning accuracy and what to add"}.`;
- const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+encodeURIComponent(key),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:mode==="evaluate"?{responseMimeType:"application/json"}:{temperature:.7}})});const d=await r.json();if(!r.ok)throw new Error(d.error?.message||"Gemini API error");const t=d.candidates?.[0]?.content?.parts?.[0]?.text;if(!t)throw new Error("AI returned an empty response");return new Response(JSON.stringify(mode==="question"?{question:t.trim()}:{...JSON.parse(t),score:Math.max(0,Math.min(10,Number(JSON.parse(t).score)||0))}),{status:200,headers:{"Content-Type":"application/json"}});
- }catch(e){return new Response(JSON.stringify({error:e.message||"Server error"}),{status:500,headers:{"Content-Type":"application/json"}})}
+  if (req.method !== "POST") return json({ error: "POST required" }, 405);
+
+  try {
+    const { mode, subject, level, question, answer, number = 0 } = await req.json();
+
+    if (mode === "question") {
+      const r = await ai.models.generateContent({
+        model: MODEL,
+        contents: `You are a supportive, accurate college viva examiner. Ask one fresh ${level} difficulty question on ${subject}. This is question number ${number}. Output only the question.`,
+        config: { temperature: 0.7 },
+      });
+      const text = r.text?.trim();
+      if (!text) throw new Error("AI returned an empty response");
+      return json({ question: text });
+    }
+
+    if (mode === "evaluate") {
+      const r = await ai.models.generateContent({
+        model: MODEL,
+        contents: `Evaluate a student's viva answer. Subject ${subject}, difficulty ${level}. Question: ${question}. Answer: ${answer}. Give fair partial credit. Return a score from 0 to 10 and short useful feedback mentioning accuracy and what to add.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "object",
+            properties: { score: { type: "integer" }, feedback: { type: "string" } },
+            required: ["score", "feedback"],
+          },
+        },
+      });
+      const data = JSON.parse(r.text || "{}");
+      const score = Math.max(0, Math.min(10, Math.round(Number(data.score)) || 0));
+      return json({ score, feedback: String(data.feedback || "No feedback returned.") });
+    }
+
+    return json({ error: "Unknown mode" }, 400);
+  } catch (e) {
+    console.error("viva function error:", e);
+    return json({ error: e?.message || "Server error" }, 500);
+  }
 };
